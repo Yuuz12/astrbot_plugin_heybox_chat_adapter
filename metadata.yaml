@@ -1,6 +1,6 @@
-name: astrbot_heybox_chat_adapter # 插件唯一识别名
+name: astrbot_plugin_heybox_chat_adapter # 插件唯一识别名
 display_name: 黑盒语音适配器 # 用于展示的名字
 desc: AstrBot 黑盒语音平台适配器插件 # 插件简短描述
 version: v1.0.1 # 插件版本号。格式：v1.1.1 或者 v1.1
 author: Yuuz12 # 作者
-repo: https://github.com/Yuuz12/astrbot_heybox_chat_adapter # 插件的仓库地址
+repo: https://github.com/Yuuz12/astrbot_plugin_heybox_chat_adapter # 插件的仓库地址

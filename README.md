@@ -11,7 +11,7 @@
 
 ## 安装
 
-1. 将本插件目录（`astrbot_heybox_chat_adapter`）复制到 AstrBot 的 `data/plugins/` 目录下。
+1. 将本插件目录（`astrbot_plugin_heybox_chat_adapter`）复制到 AstrBot 的 `data/plugins/` 目录下。
 2. 重启 AstrBot。
 3. 打开 AstrBot WebUI → 配置 → 消息平台适配器 → 添加「小黑盒 (HeyBoxChat)」：
    - `token`：小黑盒机器人开发平台（https://bot.xiaoheihe.cn ）中机器人的 Token。
