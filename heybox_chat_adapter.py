@@ -41,6 +41,9 @@ from .heybox_chat_event import HeyboxChatEvent
     adapter_display_name="小黑盒 (HeyBoxChat)",
 )
 class HeyboxChatAdapter(Platform):
+    # 由 Star 插件注入的 AstrBotConfig 引用，用于读取 wake_prefix 等顶层配置。
+    config_ref = None
+
     def __init__(
         self,
         platform_config: dict,
@@ -196,7 +199,9 @@ class HeyboxChatAdapter(Platform):
         if isinstance(send_time, (int, float)) and send_time > 0:
             abm.timestamp = int(send_time / 1000)
 
-        if event_type == "50" or data.get("command_info"):
+        if event_type == "50" or data.get("command_info") or self._has_bot_command(
+            data
+        ):
             self._convert_command_data(data, abm)
         else:
             self._convert_message_data(data, abm)
@@ -221,8 +226,10 @@ class HeyboxChatAdapter(Platform):
     def _convert_command_data(self, data: dict, abm: AstrBotMessage) -> None:
         """转换 Bot 命令事件 (type 50)。
 
-        小黑盒命令通过 `/命令名 参数...` 触发，WebSocket 推送的是命令结构。
-        这里将其还原为 AstrBot 可识别的命令文本。
+        小黑盒命令通过唤醒词触发（如 `/命令名 参数...`），WebSocket 推送的是
+        命令结构（command_info），已经去掉了唤醒词前缀。这里将其还原为
+        AstrBot 可识别的完整文本，并从配置动态读取 wake_prefix 加回前缀，
+        使 AstrBot 能正确识别唤醒词。
 
         注意：当用户仅是 @机器人 而未真正触发命令时，小黑盒也会推送 type 50，
         但 command_info 为空（name/options 为空），此时回退为普通消息解析。
@@ -231,6 +238,25 @@ class HeyboxChatAdapter(Platform):
         name = str(cmd.get("name") or "")
         options = cmd.get("options") or []
         if not name and not options:
+            # command_info 为空但消息带有 bot_command 标记：用户直接输入了
+            # "/命令"（未在平台注册），小黑盒将命令正文以 markdown 形式
+            # 放入 msg 字段推送（如 "/**user\_get**"）。还原为纯文本指令，
+            # 交给 AstrBot 的命令路由处理，避免被当作普通消息喂给 LLM。
+            if self._has_bot_command(data):
+                text = self._clean_command_markdown(str(data.get("msg") or ""))
+                wake_prefixes: list = (
+                    self.config_ref.get("wake_prefix", []) if self.config_ref else []
+                )
+                if wake_prefixes and not any(
+                    text.startswith(p) for p in wake_prefixes
+                ):
+                    text = f"{wake_prefixes[0]}{text}"
+                logger.info(
+                    f"[heychat] 检测到未注册的 Bot 命令，还原后: {text!r}"
+                )
+                abm.message_str = text
+                abm.message = [Plain(text=text)]
+                return
             self._convert_message_data(data, abm)
             return
         parts = [name]
@@ -239,6 +265,15 @@ class HeyboxChatAdapter(Platform):
             if value is not None:
                 parts.append(str(value))
         text = " ".join(parts).strip()
+        # type 50 命令结构去掉了唤醒词前缀，这里从配置动态读取 wake_prefix
+        # 加回前缀。唤醒词是什么就用什么，不硬编码。
+        wake_prefixes: list = (
+            self.config_ref.get("wake_prefix", []) if self.config_ref else []
+        )
+        if wake_prefixes and not any(
+            text.startswith(p) for p in wake_prefixes
+        ):
+            text = f"{wake_prefixes[0]}{text}"
         abm.message_str = text
         abm.message = [Plain(text=text)]
 
@@ -266,6 +301,27 @@ class HeyboxChatAdapter(Platform):
 
         abm.message = components
         abm.message_str = message_str
+
+    def _has_bot_command(self, data: dict) -> bool:
+        """判断消息是否带有 bot_command 标记（用户直接输入 "/命令" 未注册）。"""
+        try:
+            addition = json.loads(str(data.get("addition") or "{}"))
+        except (json.JSONDecodeError, TypeError):
+            return False
+        return bool((addition or {}).get("bot_command"))
+
+    @staticmethod
+    def _clean_command_markdown(msg: str) -> str:
+        """还原小黑盒对 "/命令" 的 markdown 化处理。
+
+        当用户直接输入 "/命令名"（未在平台命令列表注册）时，小黑盒会把
+        命令名用加粗包裹并转义下划线，如 "/**user\_get**"。这里还原为
+        纯文本 "/user_get"，供 AstrBot 指令路由识别。
+        """
+        # 去掉加粗标记 **...** 与单独的下划线转义
+        text = re.sub(r"\*\*", "", msg)
+        text = text.replace(r"\_", "_")
+        return text.strip()
 
     @staticmethod
     def _parse_rich_message(msg: str) -> tuple[list, str]:

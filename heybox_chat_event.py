@@ -100,42 +100,12 @@ class HeyboxChatEvent(AstrMessageEvent):
         - use_fallback=False：累积全部内容后一次性发送（对应"关闭流式回复"）
         - use_fallback=True：按标点符号分段发送（对应"实时分段"）
 
-        重要：流式输出时 respond stage 走 STREAMING_RESULT 分支，调用 send_streaming
-        后直接 return，不会处理 result.chain 中的 At/Reply 组件。因此这里需要手动
-        从 result 中提取这些组件，添加到发送的消息链中，以支持 reply_with_mention /
-        reply_with_quote 配置在流式模式下也生效。
+        与 aiocqhttp 一致，流式输出时不主动构造 At/Reply 组件。
+        reply_with_mention / reply_with_quote 仅在非流式输出时由框架的
+        result_decorate stage 按当前激活配置处理。如需艾特/引用，请在
+        AstrBot 配置中关闭流式输出（provider_settings.streaming_response），
+        走非流式路径即可正确生效。
         """
-        # 从 result 中提取 At/Reply 组件
-        # 注意：流式输出时 result_decorate stage 会跳过 At/Reply 插入逻辑
-        # （STREAMING_RESULT 时直接 return），因此需要手动构造。
-        header_comps: list = []
-        has_at = False
-        has_reply = False
-        result = self.get_result()
-        if result and result.chain:
-            for comp in result.chain:
-                if isinstance(comp, (At, AtAll)):
-                    has_at = True
-                    header_comps.append(comp)
-                elif isinstance(comp, Reply):
-                    has_reply = True
-                    header_comps.append(comp)
-        # 流式输出时手动构造 At/Reply（result_decorate 在 STREAMING_RESULT 时跳过插入）
-        if (
-            not has_at
-            and self.reply_with_mention
-            and self.astrbot_message_type != MessageType.FRIEND_MESSAGE
-        ):
-            header_comps.append(
-                At(qq=self.get_sender_id(), name=self.get_sender_name())
-            )
-        if not has_reply and self.reply_with_quote:
-            header_comps.append(Reply(id=self.message_obj.message_id))
-        logger.info(
-            f"[heychat] send_streaming 被调用, use_fallback={use_fallback}, "
-            f"header_comps={[type(c).__name__ for c in header_comps]}"
-        )
-
         if not use_fallback:
             buffer: MessageChain | None = None
             chunk_count = 0
@@ -149,9 +119,6 @@ class HeyboxChatEvent(AstrMessageEvent):
             if not buffer:
                 logger.info("[heychat] buffer 为空，走基类 send_streaming")
                 return await super().send_streaming(generator, use_fallback)
-            # 在消息链前面添加 At/Reply 组件
-            if header_comps:
-                buffer.chain = header_comps + buffer.chain
             buffer.squash_plain()
             await self.send(buffer)
             return await super().send_streaming(generator, use_fallback)
@@ -159,40 +126,21 @@ class HeyboxChatEvent(AstrMessageEvent):
         # fallback：按标点分段发送
         text_buffer = ""
         pattern = re.compile(r"[^。？！~…]+[。？！~…]+")
-        header_sent = False
         async for chain in generator:
             if isinstance(chain, MessageChain):
                 for comp in chain.chain:
                     if isinstance(comp, Plain):
                         text_buffer += comp.text
                         if any(p in text_buffer for p in "。？！~…"):
-                            # 第一段发送时带上 At/Reply 组件
-                            if not header_sent and header_comps:
-                                await self.send(
-                                    MessageChain(
-                                        chain=header_comps + [Plain(text_buffer)]
-                                    )
-                                )
-                                header_sent = True
-                                text_buffer = ""
-                            else:
-                                text_buffer = await self.process_buffer(
-                                    text_buffer, pattern
-                                )
+                            text_buffer = await self.process_buffer(
+                                text_buffer, pattern
+                            )
                     else:
                         await self.send(MessageChain(chain=[comp]))
                         await asyncio.sleep(1.5)  # 限速
         text_buffer = text_buffer.strip()
         if text_buffer:
-            if not header_sent and header_comps:
-                await self.send(
-                    MessageChain(chain=header_comps + [Plain(text_buffer)])
-                )
-                header_sent = True
-            else:
-                await self.send(MessageChain([Plain(text_buffer)]))
-        elif not header_sent and header_comps:
-            await self.send(MessageChain(chain=header_comps))
+            await self.send(MessageChain([Plain(text_buffer)]))
         return await super().send_streaming(generator, use_fallback)
 
     async def _send_channel(self, message: MessageChain) -> None:
