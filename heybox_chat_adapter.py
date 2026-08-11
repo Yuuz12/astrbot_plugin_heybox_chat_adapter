@@ -199,9 +199,7 @@ class HeyboxChatAdapter(Platform):
         if isinstance(send_time, (int, float)) and send_time > 0:
             abm.timestamp = int(send_time / 1000)
 
-        if event_type == "50" or data.get("command_info") or self._has_bot_command(
-            data
-        ):
+        if event_type == "50" or data.get("command_info"):
             self._convert_command_data(data, abm)
         else:
             self._convert_message_data(data, abm)
@@ -238,25 +236,9 @@ class HeyboxChatAdapter(Platform):
         name = str(cmd.get("name") or "")
         options = cmd.get("options") or []
         if not name and not options:
-            # command_info 为空但消息带有 bot_command 标记：用户直接输入了
-            # "/命令"（未在平台注册），小黑盒将命令正文以 markdown 形式
-            # 放入 msg 字段推送（如 "/**user\_get**"）。还原为纯文本指令，
-            # 交给 AstrBot 的命令路由处理，避免被当作普通消息喂给 LLM。
-            if self._has_bot_command(data):
-                text = self._clean_command_markdown(str(data.get("msg") or ""))
-                wake_prefixes: list = (
-                    self.config_ref.get("wake_prefix", []) if self.config_ref else []
-                )
-                if wake_prefixes and not any(
-                    text.startswith(p) for p in wake_prefixes
-                ):
-                    text = f"{wake_prefixes[0]}{text}"
-                logger.info(
-                    f"[heychat] 检测到未注册的 Bot 命令，还原后: {text!r}"
-                )
-                abm.message_str = text
-                abm.message = [Plain(text=text)]
-                return
+            # command_info 为空（type 50 空命令或带 bot_command 标记的
+            # 未注册 "/命令"）：按普通消息解析，markdown 化命令文本的
+            # 还原统一在 _convert_message_data 中处理。
             self._convert_message_data(data, abm)
             return
         parts = [name]
@@ -280,6 +262,19 @@ class HeyboxChatAdapter(Platform):
     def _convert_message_data(self, data: dict, abm: AstrBotMessage) -> None:
         """转换普通频道消息事件 (type 5/1)。"""
         raw_msg = str(data.get("msg") or "")
+        # 小黑盒推送的消息会对 markdown 特殊字符做转义（如 _ → \_），
+        # 统一反转义恢复用户原始输入，避免下划线类命令名（如 /get_user）
+        # 变成 /get\_user 导致 AstrBot 指令路由匹配失败。
+        raw_msg = self._unescape_markdown(raw_msg)
+        # 带 bot_command 标记的消息：小黑盒还会把命令名加粗包裹
+        # （如 /**user\_get**），去掉加粗装饰。此标记仅表示用户输入了
+        # "/命令"，是否是指令仍由 AstrBot 指令路由按 wake_prefix 判定，
+        # 普通 "/文本" 消息因此不会被改写。
+        if self._has_bot_command(data) and "**" in raw_msg:
+            raw_msg = self._clean_command_markdown(raw_msg)
+            logger.info(
+                f"[heychat] 还原小黑盒 markdown 化命令文本: {raw_msg!r}"
+            )
         components, message_str = self._parse_rich_message(raw_msg)
 
         # 纯图片消息（msg 中未内嵌图片时）：img 字段或 addition.img_files_info
@@ -311,17 +306,17 @@ class HeyboxChatAdapter(Platform):
         return bool((addition or {}).get("bot_command"))
 
     @staticmethod
-    def _clean_command_markdown(msg: str) -> str:
-        """还原小黑盒对 "/命令" 的 markdown 化处理。
+    def _unescape_markdown(msg: str) -> str:
+        """反转义小黑盒对 markdown 特殊字符的转义（如 \_ → _）。"""
+        return msg.replace(r"\_", "_").replace(r"\*", "*")
 
-        当用户直接输入 "/命令名"（未在平台命令列表注册）时，小黑盒会把
-        命令名用加粗包裹并转义下划线，如 "/**user\_get**"。这里还原为
-        纯文本 "/user_get"，供 AstrBot 指令路由识别。
+    @staticmethod
+    def _clean_command_markdown(msg: str) -> str:
+        """去掉小黑盒对 "/命令" 的加粗包裹（如 /**user\_get** → /user_get）。
+
+        注意：下划线等转义的还原由 _unescape_markdown 负责，这里只去 **。
         """
-        # 去掉加粗标记 **...** 与单独的下划线转义
-        text = re.sub(r"\*\*", "", msg)
-        text = text.replace(r"\_", "_")
-        return text.strip()
+        return re.sub(r"\*\*", "", msg).strip()
 
     @staticmethod
     def _parse_rich_message(msg: str) -> tuple[list, str]:
